@@ -1,0 +1,16 @@
+{
+  "name": "ecommerce-e2e",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:smoke": "playwright test tests/smoke.spec.ts --reporter=list",
+    "test:critical": "playwright test tests/critical-journey.spec.ts --reporter=list",
+    "test:admin": "playwright test tests/admin.spec.ts --reporter=list",
+    "test:api": "playwright test tests/api.spec.ts --reporter=list",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  }
+}

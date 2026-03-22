@@ -1,0 +1,159 @@
+version: '3.9'
+
+# ============================================================
+# ShopNext — Docker Compose (development + staging)
+#
+# Services:
+#   postgres    PostgreSQL 16
+#   redis       Redis 7 (cache + session)
+#   api         NestJS backend
+#   web         Next.js frontend
+#   nginx       Reverse proxy
+# ============================================================
+
+networks:
+  shopnet:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+
+services:
+  # ----------------------------------------------------------
+  # Database
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: shopnext-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-shopnext}
+      POSTGRES_USER: ${POSTGRES_USER:-shopnext}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro   # runs SQL files on first boot
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    networks:
+      - shopnet
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-shopnext} -d ${POSTGRES_DB:-shopnext}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ----------------------------------------------------------
+  # Cache
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: shopnext-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    networks:
+      - shopnet
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------
+  # Backend — NestJS API
+  # ----------------------------------------------------------
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runner
+    container_name: shopnext-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-shopnext}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shopnext}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-30d}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3001}
+      THROTTLE_TTL: ${THROTTLE_TTL:-60}
+      THROTTLE_LIMIT: ${THROTTLE_LIMIT:-60}
+    ports:
+      - '${API_PORT:-3000}:3000'
+    networks:
+      - shopnet
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Health endpoint is at /api/health (not /api/v1/health)
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3000/api/health | grep -q "ok" || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ----------------------------------------------------------
+  # Frontend — Next.js
+  # ----------------------------------------------------------
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost/api/v1}
+    container_name: shopnext-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3001
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost/api/v1}
+    ports:
+      - '${WEB_PORT:-3001}:3001'
+    networks:
+      - shopnet
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3001/ | grep -q "html" || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # Reverse Proxy — Nginx
+  # ----------------------------------------------------------
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: shopnext-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - '${NGINX_HTTP_PORT:-80}:80'
+      - '${NGINX_HTTPS_PORT:-443}:443'
+    networks:
+      - shopnet
+    depends_on:
+      - api
+      - web
+    healthcheck:
+      test: ['CMD', 'nginx', '-t']
+      interval: 30s
+      timeout: 5s
+      retries: 3
